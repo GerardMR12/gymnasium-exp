@@ -14,9 +14,15 @@ class Model(nn.Module):
         layers.append(nn.Linear(obs_size, n_hidden))
         layers.append(nn.ReLU())
         layers.append(nn.Linear(n_hidden, action_vocab_size))
-        layers.append(nn.ReLU())
         layers.append(nn.Softmax(dim=-1))
         self.seq = nn.Sequential(*layers)
+
+        self.init_weights()
+
+    def init_weights(self):
+        for layer in self.seq:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
 
     def forward(self, x):
         # Ensure x is a tensor of type long (if representing indices)
@@ -42,6 +48,13 @@ class VNetwork(nn.Module):
         layers.append(nn.Linear(n_hidden, 1))
         self.seq = nn.Sequential(*layers)
 
+        self.init_weights()
+
+    def init_weights(self):
+        for layer in self.seq:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
+
     def forward(self, x):
         # Ensure x is a tensor of type long (if representing indices)
         if not isinstance(x, torch.Tensor):
@@ -51,7 +64,7 @@ class VNetwork(nn.Module):
 
 if __name__ == "__main__":
     # Initialise the environment
-    reward_scale = 0.001
+    reward_scale = 0.01
     env = gym.make("CartPole-v1") # , desc=generate_random_map(size=map_size)
 
     observation, info = env.reset(seed=42) # reset, observation is the state
@@ -61,14 +74,14 @@ if __name__ == "__main__":
 
     # Models parameters
     n_hidden = 16
-    learning_rate = 5e-4
+    learning_rate = 3e-4
     load_model = False
 
     model = Model(env.observation_space.shape[0], env.action_space.n, n_hidden) # NN policy network
     if load_model and os.path.exists("CartPole-v1/model.pt"):
         print("Loading model...")
         model.load_state_dict(torch.load("CartPole-v1/model.pt")) # load the model
-    optimizer_pi = optim.Adam(model.parameters(), lr=learning_rate, maximize=True) # Adam optimizer
+    optimizer_pi = optim.Adam(model.parameters(), lr=learning_rate) # Adam optimizer
     model.train()
 
     v_net = VNetwork(env.observation_space.shape[0], n_hidden) # NN value network
@@ -78,15 +91,15 @@ if __name__ == "__main__":
     criterion = nn.MSELoss(reduction="mean") # MSE loss as a loss function
 
     # PPO parameters
-    epsilon = 0.3
+    epsilon = 0.2
     discount = 0.99
     gae_param = 0.95
 
     # Training parameters
-    epochs = 10000
+    epochs = 1000
     horizon = 100
-    optim_steps = 10
-    batch_size = 64
+    optim_steps = 5
+    batch_size = 16
 
     # Losses
     all_losses_pi = []
@@ -112,7 +125,7 @@ if __name__ == "__main__":
                 done += [float(terminated or truncated)] # store done
                 observations = observations + [next_observation] # store observation
                 rewards += [reward * reward_scale] # store reward
-                delta_t += [reward + (1 - float(terminated or truncated)) * discount * v_net(next_observation) - v_net(observation)] # calculate delta_t
+                delta_t += [reward * reward_scale + (1 - float(terminated or truncated)) * discount * v_net(next_observation) - v_net(observation)] # calculate delta_t
 
             if terminated or truncated:
                 observation, info = env.reset()
@@ -135,23 +148,33 @@ if __name__ == "__main__":
                 last_return = rewards[t] + discount * (1 - done[t]) * last_return
                 g[t] = last_return # store G(t)
 
-        for _ in range(optim_steps): # PPsO update
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6) # normalise advantages
+
+        for _ in range(optim_steps): # PPO update
             # Optimise the policy
             sampled_indices = np.random.choice(range(T), size=batch_size, replace=False)
             sampled_observations = [observations[i] for i in sampled_indices]
             sampled_log_probs = log_probs[sampled_indices]
             sampled_advantages = advantages[sampled_indices]
+            sampled_g = g[sampled_indices]
 
-            _, new_log_probs, _ = model(observations)
-            ratio = torch.exp(new_log_probs - log_probs)
-            clipped_ratio = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)            
+            _, new_log_probs, _ = model(sampled_observations)
+            ratio = torch.exp(new_log_probs - sampled_log_probs)
+            clipped_ratio = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
 
-            loss_pi = torch.min(ratio * advantages, clipped_ratio * advantages).mean() # clipped surrogate loss
+            # --------------- Debugging ---------------
+            # print(sampled_advantages)
+            # print(torch.min(ratio * sampled_advantages, clipped_ratio * sampled_advantages).mean())
+            # from time import sleep
+            # sleep(1)
+            # --------------- Debugging ---------------
+
+            loss_pi = -torch.min(ratio * sampled_advantages, clipped_ratio * sampled_advantages).mean() # clipped surrogate loss
             optimizer_pi.zero_grad()
             loss_pi.backward()
             optimizer_pi.step()
 
-            loss_v: torch.Tensor = criterion(v_net(observations).view(-1), g) # value function loss
+            loss_v: torch.Tensor = criterion(v_net(sampled_observations).view(-1), sampled_g) # value function loss
             optimizer_v.zero_grad()
             loss_v.backward()
             optimizer_v.step()

@@ -14,10 +14,18 @@ class Model(nn.Module):
         super(Model, self).__init__()
         layers = []
         layers.append(nn.Embedding(obs_vocab_size, n_hidden))
-        layers.append(nn.Linear(n_hidden, action_vocab_size))
+        layers.append(nn.Linear(n_hidden, n_hidden))
         layers.append(nn.ReLU())
+        layers.append(nn.Linear(n_hidden, action_vocab_size))
         layers.append(nn.Softmax(dim=-1))
         self.seq = nn.Sequential(*layers)
+
+        self.init_weights()
+
+    def init_weights(self):
+        for layer in self.seq:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
 
     def forward(self, x):
         # Ensure x is a tensor of type long (if representing indices)
@@ -40,8 +48,17 @@ class VNetwork(nn.Module):
         super(VNetwork, self).__init__()
         layers = []
         layers.append(nn.Embedding(obs_vocab_size, n_hidden))
+        layers.append(nn.Linear(n_hidden, n_hidden))
+        layers.append(nn.ReLU())
         layers.append(nn.Linear(n_hidden, 1))
         self.seq = nn.Sequential(*layers)
+
+        self.init_weights()
+
+    def init_weights(self):
+        for layer in self.seq:
+            if isinstance(layer, nn.Linear):
+                nn.init.xavier_uniform_(layer.weight)
 
     def forward(self, x):
         # Ensure x is a tensor of type long (if representing indices)
@@ -53,6 +70,7 @@ class VNetwork(nn.Module):
 
 if __name__ == "__main__":
     # Initialise the environment
+    reward_scale = 10
     map_size = 3
     map_name = "4x4"
     env = gym.make("FrozenLake-v1", is_slippery=False, map_name=map_name) # , desc=generate_random_map(size=map_size)
@@ -63,15 +81,15 @@ if __name__ == "__main__":
     print_info = False
 
     # Models parameters
-    n_hidden = 8
-    learning_rate = 1e-4
+    n_hidden = 16
+    learning_rate = 3e-4
     load_model = False
 
     model = Model(env.observation_space.n, env.action_space.n, n_hidden) # NN policy network
     if load_model and os.path.exists("FrozenLake-v1/model.pt"):
         print("Loading model...")
         model.load_state_dict(torch.load("FrozenLake-v1/model.pt")) # load the model
-    optimizer_pi = optim.Adam(model.parameters(), lr=learning_rate, maximize=True) # Adam optimizer
+    optimizer_pi = optim.Adam(model.parameters(), lr=learning_rate) # Adam optimizer
     model.train()
 
     v_net = VNetwork(env.observation_space.n, n_hidden) # NN value network
@@ -83,10 +101,10 @@ if __name__ == "__main__":
     # PPO parameters
     epsilon = 0.2
     discount = 0.99
-    gae_param = 0.95
+    gae_param = 0.99
 
     # Training parameters
-    epochs = 30000
+    epochs = 1000
     horizon = 50
     optim_steps = 5
     batch_size = 32
@@ -114,8 +132,8 @@ if __name__ == "__main__":
             with torch.no_grad():
                 done += [float(terminated or truncated)] # store done
                 observations = observations + [next_observation] # store observation
-                rewards += [reward] # store reward
-                delta_t += [reward + (1 - float(terminated or truncated)) * discount * v_net(next_observation) - v_net(observation)] # calculate delta_t
+                rewards += [reward * reward_scale] # store reward
+                delta_t += [reward * reward_scale + (1 - float(terminated or truncated)) * discount * v_net(next_observation) - v_net(observation)] # calculate delta_t
 
             if terminated or truncated:
                 observation, info = env.reset()
@@ -137,24 +155,27 @@ if __name__ == "__main__":
                 # Compute discounted return
                 last_return = rewards[t] + discount * (1 - done[t]) * last_return
                 g[t] = last_return # store G(t)
+            
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-6) # normalise advantages
 
-        for _ in range(optim_steps): # PPsO update
+        for _ in range(optim_steps): # PPO update
             # Optimise the policy
             sampled_indices = np.random.choice(range(T), size=batch_size, replace=False)
             sampled_observations = [observations[i] for i in sampled_indices]
             sampled_log_probs = log_probs[sampled_indices]
             sampled_advantages = advantages[sampled_indices]
+            sampled_g = g[sampled_indices]
 
-            _, new_log_probs, _ = model(observations)
-            ratio = torch.exp(new_log_probs - log_probs)
+            _, new_log_probs, _ = model(sampled_observations)
+            ratio = torch.exp(new_log_probs - sampled_log_probs)
             clipped_ratio = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
 
-            loss_pi = torch.min(ratio * advantages, clipped_ratio * advantages).mean() # clipped surrogate loss
+            loss_pi = -torch.min(ratio * sampled_advantages, clipped_ratio * sampled_advantages).mean() # clipped surrogate loss
             optimizer_pi.zero_grad()
             loss_pi.backward()
             optimizer_pi.step()
 
-            loss_v: torch.Tensor = criterion(v_net(observations).view(-1), g) # value function loss
+            loss_v: torch.Tensor = criterion(v_net(sampled_observations).view(-1), sampled_g) # value function loss
             optimizer_v.zero_grad()
             loss_v.backward()
             optimizer_v.step()
