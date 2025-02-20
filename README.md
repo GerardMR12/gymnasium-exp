@@ -1,7 +1,7 @@
 # Reinforcement Learning Algorithms in Gymnasium
 
-[![License](https://img.shields.io/badge/license-MIT-red.svg)](https://img.shields.io/badge/license-GPL-blue.svg)
-[![py3comp](https://img.shields.io/badge/py3-compatible-brightgreen.svg)](https://img.shields.io/badge/py3-compatible-brightgreen.svg)
+[![License](https://img.shields.io/badge/license-MIT-750014.svg)](https://img.shields.io/badge/license-MIT-red.svg)
+[![py3comp](https://img.shields.io/badge/py3-compatible-306998.svg)](https://img.shields.io/badge/py3-compatible-blue.svg)
 
 Implementing Reinforcement Learning algorithms in some of the `gymnasium` environments.
 
