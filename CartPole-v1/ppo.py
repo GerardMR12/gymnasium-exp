@@ -96,7 +96,7 @@ if __name__ == "__main__":
     gae_param = 0.95
 
     # Training parameters
-    epochs = 1000
+    epochs = 10000
     horizon = 100
     optim_steps = 5
     batch_size = 16
