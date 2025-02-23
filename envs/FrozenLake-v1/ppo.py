@@ -73,7 +73,7 @@ if __name__ == "__main__":
     reward_scale = 10
     map_size = 3
     map_name = "4x4"
-    env = gym.make("FrozenLake-v1", is_slippery=False, map_name=map_name) # , desc=generate_random_map(size=map_size)
+    env = gym.make("FrozenLake-v1", is_slippery=False, map_name=map_name, desc=generate_random_map(size=map_size)) # , desc=generate_random_map(size=map_size)
 
     observation, info = env.reset(seed=42) # reset, observation is the state
 
@@ -104,9 +104,9 @@ if __name__ == "__main__":
     gae_param = 0.99
 
     # Training parameters
-    epochs = 1000
+    epochs = 3000
     horizon = 50
-    optim_steps = 5
+    optim_steps = 3
     batch_size = 32
 
     # Losses

@@ -1,4 +1,5 @@
 import gymnasium as gym
+import time
 
 # Initialise the environment
 env = gym.make("CartPole-v1", render_mode="human")
@@ -12,6 +13,7 @@ for _ in range(1000):
 
     # If the episode has ended then we can reset to start a new episode
     if terminated or truncated:
+        time.sleep(1)
         observation, info = env.reset()
 
 env.render()

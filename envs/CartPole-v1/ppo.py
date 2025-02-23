@@ -82,6 +82,20 @@ if __name__ == "__main__":
         print("Loading model...")
         model.load_state_dict(torch.load("CartPole-v1/model.pt")) # load the model
     optimizer_pi = optim.Adam(model.parameters(), lr=learning_rate) # Adam optimizer
+
+    # Test the untrained model
+    total_rewards = []
+    obs, _ = env.reset()
+    rewards = 0
+    for _ in range(10000):
+        action, log_prob, probs = model(obs)
+        obs, reward, terminated, truncated, info = env.step(int(action))
+        rewards += reward
+        if terminated or truncated:
+            obs, _ = env.reset()
+            total_rewards.append(rewards)
+            rewards = 0
+
     model.train()
 
     v_net = VNetwork(env.observation_space.shape[0], n_hidden) # NN value network
@@ -93,13 +107,13 @@ if __name__ == "__main__":
     # PPO parameters
     epsilon = 0.2
     discount = 0.99
-    gae_param = 0.95
+    gae_param = 1
 
     # Training parameters
-    epochs = 10000
-    horizon = 100
-    optim_steps = 5
-    batch_size = 16
+    epochs = 20000
+    horizon = 2048
+    optim_steps = 16
+    batch_size = 128
 
     # Losses
     all_losses_pi = []
@@ -109,7 +123,7 @@ if __name__ == "__main__":
     for e in range(epochs):
         observation, info = env.reset() # reset, observation is the state
         done = [] # initialise done
-        log_probs = torch.tensor([]) # initialise old_probs
+        log_probs = [] # initialise old_probs
         observations = [] # initialise observations
         rewards = [] # initialise rewards
         delta_t = [] # initialise delta_t
@@ -120,10 +134,10 @@ if __name__ == "__main__":
             if print_info:
                 print(f"    Observation: {observation}, Reward: {reward}, Terminated: {terminated}, Truncated: {truncated}")
 
-            log_probs = torch.cat([log_probs, torch.tensor([log_prob])])
             with torch.no_grad():
                 done += [float(terminated or truncated)] # store done
-                observations = observations + [next_observation] # store observation
+                log_probs += [log_prob] # store log_prob
+                observations = observations + [observation] # store observation
                 rewards += [reward * reward_scale] # store reward
                 delta_t += [reward * reward_scale + (1 - float(terminated or truncated)) * discount * v_net(next_observation) - v_net(observation)] # calculate delta_t
 
@@ -154,11 +168,12 @@ if __name__ == "__main__":
             # Optimise the policy
             sampled_indices = np.random.choice(range(T), size=batch_size, replace=False)
             sampled_observations = [observations[i] for i in sampled_indices]
-            sampled_log_probs = log_probs[sampled_indices]
+            sampled_log_probs = torch.tensor(log_probs)[sampled_indices]
             sampled_advantages = advantages[sampled_indices]
             sampled_g = g[sampled_indices]
+            obs = torch.tensor(sampled_observations, requires_grad=True)
 
-            _, new_log_probs, _ = model(sampled_observations)
+            _, new_log_probs, _ = model(obs)
             ratio = torch.exp(new_log_probs - sampled_log_probs)
             clipped_ratio = torch.clamp(ratio, 1 - epsilon, 1 + epsilon)
 
@@ -183,9 +198,9 @@ if __name__ == "__main__":
             all_losses_pi.append(loss_pi.item())
             all_losses_v.append(loss_v.item())
 
-        all_rewards.append(sum(g))
+        all_rewards.append(g.mean().item())
 
-        print(f"CartPole-v1 epoch: {e}, Policy Loss: {all_losses_pi[-1]:.4f}, Value Loss: {all_losses_v[-1]:.4f}, Total Rewards: {all_rewards[-1]}")
+        print(f"CartPole-v1 epoch: {e}, Policy Loss: {all_losses_pi[-1]:.4f}, Value Loss: {all_losses_v[-1]:.4f}, Total Rewards: {all_rewards[-1]:.2f}")
 
     # Draw the surrogate losses
     smoothed = pd.DataFrame(all_losses_pi).rolling(window=int(len(all_losses_pi)/10)).mean()
@@ -207,6 +222,27 @@ if __name__ == "__main__":
     plt.legend()
     plt.savefig("CartPole-v1/rewards.png")
     plt.clf()
+
+    model.eval()
+    # Test the trained model
+    obs, _ = env.reset()
+    rewards = 0
+    for _ in range(10000):
+        action, log_prob, probs = model(obs)
+        obs, reward, terminated, truncated, info = env.step(int(action))
+        rewards += reward
+        if terminated or truncated:
+            obs, _ = env.reset()
+            total_rewards.append(rewards)
+            rewards = 0
+
+    # Draw the rewards
+    smoothed = pd.DataFrame(total_rewards).rolling(window=int(len(total_rewards)/10)).mean()
+    plt.plot(smoothed)
+    plt.xlabel("Timesteps")
+    plt.ylabel("Rewards")
+    plt.title("Rewards over time")
+    plt.savefig("CartPole-v1/untraind_trained_rewards.png")
 
     # Save the model
     torch.save(model.state_dict(), "CartPole-v1/model.pt")
