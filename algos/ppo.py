@@ -8,10 +8,19 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from torchrl.data import LazyTensorStorage, SamplerWithoutReplacement
-from torchrl.data import TensorDictReplayBuffer
+from torchrl.data.replay_buffers import ReplayBuffer
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
+from torchrl.envs.utils import ExplorationType, set_exploration_type
+from torchrl.envs.libs.gym import GymEnv
+from torchrl.envs import (
+    Compose,
+    DoubleToFloat,
+    ObservationNorm,
+    StepCounter,
+    TransformedEnv,
+)
 
 from tensordict import TensorDict
 from tensordict.nn import TensorDictModule
@@ -28,12 +37,13 @@ class PPO():
     def __init__(
             self,
             env: Env,
+            test_env: Env,
             policy: nn.Module,
             v_function: nn.Module,
             horizon: int = 2048,
-            total_steps: int = 10000,
             minibatch_size: int = 64,
             optim_steps: int = 10,
+            max_grad: float = 1.0,
             epsilon: float = 0.2,
             gamma: float = 0.99,
             lmbda: float = 0.95,
@@ -45,12 +55,13 @@ class PPO():
         ########################### Parameters ###########################
         # General hyperparameters
         self._env = env
+        self._test_env = test_env
         self._policy = policy
         self._v_function = v_function
         self._horizon = horizon
-        self._total_steps = total_steps
         self._minibatch_size = minibatch_size
         self._optim_steps = optim_steps
+        self._max_grad = max_grad
 
         # Sensitive hyperparamaters
         self._epsilon = epsilon
@@ -58,6 +69,7 @@ class PPO():
         self._lmbda = lmbda
         self._c1 = c1
         self._c2 = c2
+        self._lr = lr
 
         # Cuda device
         self._device = device
@@ -75,8 +87,8 @@ class PPO():
             in_keys=["loc", "scale"],
             distribution_class=TanhNormal,
             distribution_kwargs={
-                "low": self._env.action_space.low, # e.g. tensor([1., 1., 1.])
-                "high": self._env.action_space.high, # e.g. tensor([-1., -1., -1.])
+                "low": self._env.action_space.low, # e.g. tensor([-1., -1., -1.])
+                "high": self._env.action_space.high, # e.g. tensor([1., 1., 1.])
             },
             return_log_prob=True
         )
@@ -93,6 +105,28 @@ class PPO():
             average_gae=True
         )
 
+        self._replay_buffer = ReplayBuffer(
+            storage=LazyTensorStorage(max_size=self._horizon),
+            sampler=SamplerWithoutReplacement(),
+        )
+
+        self._loss_module = ClipPPOLoss(
+            actor_network=self._actor,
+            critic_network=self._value_module,
+            clip_epsilon=(self._epsilon),
+            entropy_bonus=True,
+            critic_coef=self._c1,
+            entropy_coef=self._c2
+        )
+        ########################### PPO Core ###########################  
+
+    def learn(self, total_steps: int = 10000):
+        """
+        Learn the policy using PPO. Inspired from the torchrl implementation.
+        """
+        ########################### Learning ###########################
+        self._total_steps = total_steps
+
         self._collector = MyDataCollectorFromEnv(
             env=self._env,
             policy=self._actor,
@@ -101,36 +135,19 @@ class PPO():
             device=self._device
         )
 
-        self._tensordict_buffer = TensorDictReplayBuffer(
-            storage=LazyTensorStorage(max_size=self._horizon),
-            sampler=SamplerWithoutReplacement(),
-        )
-
-        self._loss_module = ClipPPOLoss(
-            actor_network=self._actor,
-            critic_network=self._value_module,
-            clip_epsilon=self._epsilon,
-            entropy_bonus=True,
-            critic_coef=self._c1,
-            entropy_coef=self._c2
-        )
-
-        self._optimizer = torch.optim.Adam(self._loss_module.parameters(), lr)
-        self._max_grad_norm = 1.0 # gradient clipping for the loss module
+        self._optimizer = torch.optim.Adam(self._loss_module.parameters(), self._lr)
         self._lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self._optimizer, self._total_steps // self._horizon, 0.0
+            self._optimizer, self._total_steps // self._horizon, self._lr
         )
-        ########################### PPO Core ###########################  
+        ########################### Learning ###########################
 
-    def learn(self):
-        """
-        Learn the policy using PPO. Inspired from the torchrl implementation.
-        """
         ########################### Tracking ###########################
         self._logs = defaultdict(list)
         self._pbar = tqdm(total=self._total_steps)
-        self._eval_str = ""
         ########################### Tracking ###########################
+
+        eval_str = ""
+        self._actor.train()
         for i, tensordict_data in enumerate(self._collector):
             # We now have a batch of data in tensordict_data
             for _ in range(self._optim_steps):
@@ -138,12 +155,13 @@ class PPO():
                 # Compute GAE at each epoch as its value depends on the updated value function
                 self._advantage_module(tensordict_data)
                 data_view = tensordict_data.reshape(-1)
-                self._tensordict_buffer.extend(data_view.cpu())
+                self._replay_buffer.extend(data_view.cpu())
 
                 ########################### See torchrl implementation ###########################
                 for _ in range(self._horizon // self._minibatch_size):
-                    minibatch = self._tensordict_buffer.sample(self._minibatch_size)
+                    minibatch = self._replay_buffer.sample(self._minibatch_size)
                     loss_vals = self._loss_module(minibatch.to(self._device))
+                    # print(loss_vals["loss_objective"], loss_vals["loss_critic"], loss_vals["loss_entropy"])
                     loss_value: torch.Tensor = (
                         loss_vals["loss_objective"]
                         + loss_vals["loss_critic"]
@@ -151,42 +169,53 @@ class PPO():
                     )
 
                     loss_value.backward()
-                    torch.nn.utils.clip_grad_norm_(self._loss_module.parameters(), self._max_grad_norm)
+                    torch.nn.utils.clip_grad_norm_(self._loss_module.parameters(), self._max_grad)
                     self._optimizer.step()
                     self._optimizer.zero_grad()
                 ########################### See torchrl implementation ###########################
 
-            with torch.no_grad(): # set_exploration_type(ExplorationType.DETERMINISTIC), 
-                # execute a rollout with the trained policy
-                # eval_rollout = env.rollout(1000, policy_module)
-                self._logs["eval reward"].append(eval_rollout["next", "reward"].mean().item())
-                self._logs["eval reward (sum)"].append(
-                    eval_rollout["next", "reward"].sum().item()
-                )
-                self._logs["eval step_count"].append(eval_rollout["step_count"].max().item())
-                eval_str = (
-                    f"eval cumulative reward: {self._logs['eval reward (sum)'][-1]: 4.4f} "
-                    f"(init: {self._logs['eval reward (sum)'][0]: 4.4f}), "
-                    f"eval step-count: {self._logs['eval step_count'][-1]}"
-                )
-                del eval_rollout
-
-            # Update the logs
             self._logs["reward"].append(tensordict_data["next", "reward"].mean().item())
-            self._pbar.update(tensordict_data.numel())
+            cum_reward_str = (
+                f"Average reward: {self._logs["reward"][-1]:4f}, "
+            )
             self._logs["step_count"].append(tensordict_data["step_count"].max().item())
+            stepcount_str = f"Step count (max): {self._logs["step_count"][-1]}, "
             self._logs["lr"].append(self._optimizer.param_groups[0]["lr"])
+            lr_str = f"Policy lr: {self._logs["lr"][-1]:.6f}"
+
+            if i % 10 == 0:
+                rewards, step_count = self.test_one_run()
+                self._logs["eval reward (sum)"].append(rewards)
+                self._logs["eval step_count"].append(step_count)
+
+                self._logs["reward"].append(tensordict_data["next", "reward"].mean().item())
+                self._logs["step_count"].append(tensordict_data["step_count"].max().item())
+                self._logs["lr"].append(self._optimizer.param_groups[0]["lr"])
+                eval_str = (
+                    f"Eval cumulative reward: {self._logs["eval reward (sum)"][-1]:4f}, "
+                    f"Eval step count: {self._logs["eval step_count"][-1]}, "
+                )
+            
+            # Update the progress bar
+            self._pbar.update(tensordict_data.numel())
+            self._pbar.set_description("".join([eval_str, cum_reward_str, stepcount_str, lr_str]))
+            # self._pbar.set_description(f"Current test rewards is {rewards:.4f} and step count is {step_count:.0f}. Learning rate is {last_lr[0]:.6f}")
 
             # Update the learning rate
             self._lr_scheduler.step()
 
         # Save the logs
         self._pbar.close()
+        self.plot_learning_progress()
 
+    def plot_learning_progress(self):
+        """
+        Plot the learning progress.
+        """
         plt.figure(figsize=(10, 10))
         plt.subplot(2, 2, 1)
         plt.plot(self._logs["reward"])
-        plt.title("training rewards (average)")
+        plt.title("Training rewards (average)")
         plt.subplot(2, 2, 2)
         plt.plot(self._logs["step_count"])
         plt.title("Max step count (training)")
@@ -196,7 +225,8 @@ class PPO():
         plt.subplot(2, 2, 4)
         plt.plot(self._logs["eval step_count"])
         plt.title("Max step count (test)")
-        plt.savefig(f"learning_progress.png")
+        plt.savefig(f"learning_progress.png", dpi=500)
+        plt.close()
     
     def test(self, n_steps: int = 10000):
         """
@@ -204,33 +234,55 @@ class PPO():
         """
         total_rewards = []
         total_steps = []
-        observation, _ = self._env.reset()
+        observation, _ = self._test_env.reset()
         rewards = 0
         step_count = 0
-        for _ in range(n_steps):
-            action, _, _, _ = self._actor(torch.tensor(observation, dtype=torch.float, device=self._device))
-            observation, reward, terminated, truncated, _ = self._env.step(action.detach().cpu().numpy())
-            rewards += reward
-            step_count += 1
-            if terminated or truncated:
-                observation, _ = self._env.reset()
-                total_rewards.append(rewards)
-                total_steps.append(step_count)
-                rewards = 0
-                step_count = 0
 
-        print(f"Average number of steps per trajectory: {sum(total_steps)/len(total_steps)}")
+        with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
+            for _ in range(n_steps):
+                loc, scale, action, log_prob = self._actor(torch.tensor(observation, dtype=torch.float, device=self._device))
+                observation, reward, terminated, truncated, _ = self._test_env.step(action.detach().cpu().numpy())
+                rewards += reward
+                step_count += 1
+                if terminated or truncated:
+                    observation, _ = self._test_env.reset()
+                    total_rewards.append(rewards)
+                    total_steps.append(step_count)
+                    rewards = 0
+                    step_count = 0
 
-        return total_rewards
+        print(f"Average rewards per trajectory: {sum(total_rewards)/len(total_rewards):.4f}")
+        print(f"Average number of steps per trajectory: {sum(total_steps)/len(total_steps):.2f}")
+
+        return total_rewards, total_steps
     
-    def get_plot(self, rewards: list, trained: bool, window_size_denom: int = 10):
+    def test_one_run(self):
         """
-        Plot the smoothed rewards over time.
+        Run the agent in the environment for a single trajectory.
         """
-        smoothed = pd.DataFrame(rewards).rolling(window=int(len(rewards)/window_size_denom)).mean()
-        plt.plot(smoothed)
-        plt.xlabel("Timesteps")
-        plt.ylabel("Rewards")
-        plt.title("Rewards over time")
-        plt.savefig(f"{"trained" if trained else "untrained"}_policy.png")
-        plt.clf()
+        observation, _ = self._test_env.reset()
+        rewards = 0
+        step_count = 0
+
+        with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
+            while True:
+                loc, scale, action, log_prob = self._actor(torch.tensor(observation, dtype=torch.float, device=self._device))
+                observation, reward, terminated, truncated, _ = self._test_env.step(action.detach().cpu().numpy())
+                rewards += reward
+                step_count += 1
+                if terminated or truncated or step_count >= 10000:
+                    break
+
+        return rewards, step_count
+    
+    # def get_plot(self, rewards: list, trained: bool, window_size_denom: int = 10):
+    #     """
+    #     Plot the smoothed rewards over time.
+    #     """
+    #     smoothed = pd.DataFrame(rewards).rolling(window=int(len(rewards)/window_size_denom)).mean()
+    #     plt.plot(smoothed)
+    #     plt.xlabel("Timesteps")
+    #     plt.ylabel("Rewards")
+    #     plt.title("Rewards over time")
+    #     plt.savefig(f"{"trained" if trained else "untrained"}_policy.png")
+    #     plt.clf()

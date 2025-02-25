@@ -1,9 +1,48 @@
 from gymnasium import Env
+import gymnasium as gym
 
 import torch
 import numpy as np
 
 from tensordict import TensorDict
+from torchrl.envs.utils import ExplorationType, set_exploration_type
+
+# Assuming RunningStat and NormalizedObservation from previous examples:
+class RunningStat:
+    def __init__(self, shape, eps=1e-8):
+        self.n = 0
+        self.mean = np.zeros(shape, dtype=np.float64)
+        self.M2 = np.zeros(shape, dtype=np.float64)
+        self.eps = eps
+
+    def update(self, x):
+        self.n += 1
+        delta = x - self.mean
+        self.mean += delta / self.n
+        delta2 = x - self.mean
+        self.M2 += delta * delta2
+
+    @property
+    def variance(self):
+        return self.M2 / self.n if self.n > 0 else np.ones_like(self.mean)
+
+    @property
+    def std(self):
+        return np.sqrt(self.variance) + self.eps
+    
+class NormalizedObservation(gym.ObservationWrapper):
+    def __init__(self, env, clip=10.0, update=True):
+        super().__init__(env)
+        self.clip = clip
+        self.update = update
+        self.running_stat = RunningStat(self.observation_space.shape)
+
+    def observation(self, obs):
+        if self.update:
+            self.running_stat.update(obs)
+        norm_obs = (obs - self.running_stat.mean) / self.running_stat.std
+        norm_obs = np.clip(norm_obs, -self.clip, self.clip)
+        return norm_obs
 
 class MyDataCollectorFromEnv:
     def __init__(
@@ -25,6 +64,10 @@ class MyDataCollectorFromEnv:
         self._current_step = 0
         self._traj_id = 0
         self._step_count = 0
+        self._curr_traj_r = 0
+
+        # Current observation
+        self._current_observation, _ = self._env.reset()
 
     def __iter__(self):
         """
@@ -59,27 +102,16 @@ class MyDataCollectorFromEnv:
         _next_truncated = []
 
         if self._current_step < self._total_steps:
-            observation, _ = self._env.reset()
-
             for _ in range(self._batch_steps):
-                loc, scale, action, log_prob = self._policy(torch.tensor(observation, dtype=torch.float, device=self._device))
-                next_observation, reward, terminated, truncated, _ = self._env.step(action.detach().cpu().numpy())
-
-                # print("loc:", type(loc))
-                # print("scale:", type(scale))
-                # print("action:", type(action))
-                # print("log_prob:", type(log_prob))
-                # print("next_observation:", type(next_observation))
-                # print("reward:", type(reward))
-                # print("terminated:", type(terminated))
-                # print("truncated:", type(truncated))
-                # exit()
+                with set_exploration_type(ExplorationType.RANDOM):
+                    loc, scale, action, log_prob = self._policy(torch.tensor(self._current_observation, dtype=torch.float, device=self._device))
+                    next_observation, reward, terminated, truncated, _ = self._env.step(action.detach().cpu().numpy())
 
                 # Fields from main td
                 _action.append(action)
                 _done.append(False)
                 _loc.append(loc)
-                _observation.append(observation.astype(np.float32))
+                _observation.append(self._current_observation.astype(np.float32))
                 _sample_log_prob.append(log_prob)
                 _scale.append(scale)
                 _step_count.append(self._step_count)
@@ -98,11 +130,11 @@ class MyDataCollectorFromEnv:
                 _next_truncated.append(truncated)
 
                 if terminated or truncated:
-                    observation, _ = self._env.reset()
+                    self._current_observation, _ = self._env.reset()
                     self._traj_id += 1
                     self._step_count = 0
                 else:
-                    observation = next_observation
+                    self._current_observation = next_observation
                     self._step_count += 1
 
                 self._current_step += 1

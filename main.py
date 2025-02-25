@@ -7,15 +7,19 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 
 from algos.ppo import PPO
+from algos.aux.data import NormalizedObservation
 
 # Set the device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Create the CartPole environment
 env = gym.make("Hopper-v4")
+env = NormalizedObservation(env)
+test_env = gym.make("Hopper-v4")
+test_env = NormalizedObservation(test_env)
 
 # Create the policy
-n_hidden = 128
+n_hidden = 256
 obs_dim = env.observation_space.shape[0]
 action_vocab_size = 3
 actor_net = nn.Sequential(
@@ -43,20 +47,22 @@ value_net = nn.Sequential(
 # Create the PPO algorithm
 ppo = PPO(
     env=env,
+    test_env=test_env,
     policy=actor_net,
     v_function=value_net,
-    total_steps=1000000,
+    horizon=1000,
+    minibatch_size=64,
+    optim_steps=10,
+    c1=1.0,
+    c2=0.0001,
+    lr=3e-4,
     device=device
 )
 
-# Test the untrained policy
-print("Testing the untrained policy...")
-ppo.get_plot(ppo.test(), trained=False)
-
 # Train the policy for certain timesteps
 print("Policy learning...")
-ppo.learn()
+ppo.learn(total_steps=5e6)
 
-# Test the trained policy
-print("Testing the trained policy...")
-ppo.get_plot(ppo.test(), trained=True)
+# Test the policy
+print("Policy testing...")
+_, _ = ppo.test(1e4)

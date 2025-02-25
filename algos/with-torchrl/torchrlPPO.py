@@ -44,7 +44,7 @@ max_grad_norm = 1.0
 print_info = False
 
 frames_per_batch = 1000
-total_frames = 100000 # for a complete training, bring the number of frames up to 1M
+total_frames = 50000 # for a complete training, bring the number of frames up to 1M
 
 sub_batch_size = 64 # cardinality of the sub-samples gathered from the current data in the inner loop
 num_epochs = 10  # optimization steps per batch of data collected
@@ -193,7 +193,7 @@ _ = value_module(dummy_obs)
 # designed to collect:
 for i, tensordict_data in enumerate(collector):
     # we now have a batch of data to work with. Let's learn something from it.
-    # print(f"Iteration {i}: {tensordict_data}")
+    # print(f"Iteration {i}: {tensordict_data["observation"]}")
     # from time import sleep
     # sleep(0.1)
     for _ in range(num_epochs):
@@ -213,6 +213,7 @@ for i, tensordict_data in enumerate(collector):
         for _ in range(frames_per_batch // sub_batch_size):
             subdata = replay_buffer.sample(sub_batch_size)
             loss_vals = loss_module(subdata.to(device))
+            # print([loss_vals["loss_objective"], loss_vals["loss_critic"], loss_vals["loss_entropy"]])
             loss_value = (
                 loss_vals["loss_objective"]
                 + loss_vals["loss_critic"]
@@ -246,8 +247,8 @@ for i, tensordict_data in enumerate(collector):
         with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
             # execute a rollout with the trained policy
             eval_rollout = env.rollout(1000, policy_module)
-            print(f"Eval rollout: {eval_rollout}")
-            exit()
+            # print(f"Eval rollout: {eval_rollout}")
+            # exit()
             logs["eval reward"].append(eval_rollout["next", "reward"].mean().item())
             logs["eval reward (sum)"].append(
                 eval_rollout["next", "reward"].sum().item()
