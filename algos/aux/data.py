@@ -44,7 +44,7 @@ class NormalizedObservation(gym.ObservationWrapper):
         norm_obs = np.clip(norm_obs, -self.clip, self.clip)
         return norm_obs
 
-class MyDataCollectorFromEnv:
+class DataCollectorFromEnv:
     def __init__(
             self,
             env: Env,

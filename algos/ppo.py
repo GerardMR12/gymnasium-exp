@@ -28,7 +28,7 @@ from tensordict.nn import TensorDictModule
 from gymnasium import Env
 from gymnasium import spaces
 
-from algos.aux.data import MyDataCollectorFromEnv
+from algos.aux.data import DataCollectorFromEnv
 
 class PPO():
     """
@@ -50,6 +50,8 @@ class PPO():
             c1: float = 1.0,
             c2: float = 0.01,
             lr: float = 3e-4,
+            lr_sched: bool = True,
+            lr_min: float = 0.0,
             device: torch.device = torch.device("cpu")
         ):
         ########################### Parameters ###########################
@@ -62,6 +64,8 @@ class PPO():
         self._minibatch_size = minibatch_size
         self._optim_steps = optim_steps
         self._max_grad = max_grad
+        self._lr_sched = lr_sched
+        self._lr_min = lr_min
 
         # Sensitive hyperparamaters
         self._epsilon = epsilon
@@ -127,7 +131,7 @@ class PPO():
         ########################### Learning ###########################
         self._total_steps = total_steps
 
-        self._collector = MyDataCollectorFromEnv(
+        self._collector = DataCollectorFromEnv(
             env=self._env,
             policy=self._actor,
             batch_steps=self._horizon,
@@ -137,7 +141,7 @@ class PPO():
 
         self._optimizer = torch.optim.Adam(self._loss_module.parameters(), self._lr)
         self._lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            self._optimizer, self._total_steps // self._horizon, self._lr
+            self._optimizer, self._total_steps // self._horizon, self._lr_min if self._lr_sched else self._lr
         )
         ########################### Learning ###########################
 
@@ -161,7 +165,6 @@ class PPO():
                 for _ in range(self._horizon // self._minibatch_size):
                     minibatch = self._replay_buffer.sample(self._minibatch_size)
                     loss_vals = self._loss_module(minibatch.to(self._device))
-                    # print(loss_vals["loss_objective"], loss_vals["loss_critic"], loss_vals["loss_entropy"])
                     loss_value: torch.Tensor = (
                         loss_vals["loss_objective"]
                         + loss_vals["loss_critic"]
@@ -178,13 +181,14 @@ class PPO():
             cum_reward_str = (
                 f"Average reward: {self._logs["reward"][-1]:4f}, "
             )
-            self._logs["step_count"].append(tensordict_data["step_count"].max().item())
+            self._logs["step_count"].append(tensordict_data["next", "step_count"].max().item())
             stepcount_str = f"Step count (max): {self._logs["step_count"][-1]}, "
             self._logs["lr"].append(self._optimizer.param_groups[0]["lr"])
             lr_str = f"Policy lr: {self._logs["lr"][-1]:.6f}"
 
-            if i % 10 == 0:
+            if i % 10 == 0 or True:
                 rewards, step_count = self.test_one_run()
+                self._actor.train()
                 self._logs["eval reward (sum)"].append(rewards)
                 self._logs["eval step_count"].append(step_count)
 
@@ -228,24 +232,26 @@ class PPO():
         plt.savefig(f"learning_progress.png", dpi=500)
         plt.close()
     
-    def test(self, n_steps: int = 10000):
+    def test(self, n_steps: int = 10000, env: Env = None):
         """
         Run the agent in the environment for a specified number of timesteps.
         """
+        env = env if env is not None else self._test_env
         total_rewards = []
         total_steps = []
-        observation, _ = self._test_env.reset()
+        observation, _ = env.reset()
         rewards = 0
         step_count = 0
 
+        self._actor.eval()
         with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
-            for _ in range(n_steps):
+            for _ in range(int(n_steps)):
                 loc, scale, action, log_prob = self._actor(torch.tensor(observation, dtype=torch.float, device=self._device))
-                observation, reward, terminated, truncated, _ = self._test_env.step(action.detach().cpu().numpy())
+                observation, reward, terminated, truncated, _ = env.step(action.detach().cpu().numpy())
                 rewards += reward
                 step_count += 1
                 if terminated or truncated:
-                    observation, _ = self._test_env.reset()
+                    observation, _ = env.reset()
                     total_rewards.append(rewards)
                     total_steps.append(step_count)
                     rewards = 0
@@ -264,6 +270,7 @@ class PPO():
         rewards = 0
         step_count = 0
 
+        self._actor.eval()
         with set_exploration_type(ExplorationType.DETERMINISTIC), torch.no_grad():
             while True:
                 loc, scale, action, log_prob = self._actor(torch.tensor(observation, dtype=torch.float, device=self._device))
@@ -274,15 +281,3 @@ class PPO():
                     break
 
         return rewards, step_count
-    
-    # def get_plot(self, rewards: list, trained: bool, window_size_denom: int = 10):
-    #     """
-    #     Plot the smoothed rewards over time.
-    #     """
-    #     smoothed = pd.DataFrame(rewards).rolling(window=int(len(rewards)/window_size_denom)).mean()
-    #     plt.plot(smoothed)
-    #     plt.xlabel("Timesteps")
-    #     plt.ylabel("Rewards")
-    #     plt.title("Rewards over time")
-    #     plt.savefig(f"{"trained" if trained else "untrained"}_policy.png")
-    #     plt.clf()
