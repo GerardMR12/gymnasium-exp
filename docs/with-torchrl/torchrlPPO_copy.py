@@ -14,6 +14,7 @@ from tensordict import TensorDict
 from tensordict.nn import TensorDictModule
 from tensordict.nn.distributions import NormalParamExtractor
 from torch import nn
+from torch.nn import Softmax
 
 from torchrl.collectors import SyncDataCollector
 from torchrl.data.replay_buffers import ReplayBuffer
@@ -28,7 +29,7 @@ from torchrl.envs import (
 )
 from torchrl.envs.libs.gym import GymEnv
 from torchrl.envs.utils import check_env_specs, ExplorationType, set_exploration_type
-from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator
+from torchrl.modules import ProbabilisticActor, TanhNormal, ValueOperator, OneHotCategorical
 from torchrl.objectives import ClipPPOLoss
 from torchrl.objectives.value import GAE
 from tqdm import tqdm
@@ -264,12 +265,12 @@ actor_net = nn.Sequential(
     NormalParamExtractor(),
 )
 
-policy_module = TensorDictModule(
+policy_td_module = TensorDictModule(
     actor_net, in_keys=["observation"], out_keys=["loc", "scale"]
 )
 
 policy_module = ProbabilisticActor(
-    module=policy_module,
+    module=policy_td_module,
     spec=env.action_spec,
     in_keys=["loc", "scale"],
     distribution_class=TanhNormal,
@@ -280,6 +281,34 @@ policy_module = ProbabilisticActor(
     return_log_prob=True,
     # we'll need the log-prob for the numerator of the importance weights
 )
+
+actor_net = nn.Sequential(
+    nn.LazyLinear(num_cells, device=device),
+    nn.Tanh(),
+    nn.LazyLinear(num_cells, device=device),
+    nn.Tanh(),
+    nn.LazyLinear(num_cells, device=device),
+    nn.Tanh(),
+    nn.LazyLinear(32, device=device),
+    Softmax(),
+)
+
+policy_td_module = TensorDictModule(
+    actor_net, in_keys=["observation"], out_keys=["logits"]
+)
+
+logits_policy = ProbabilisticActor(
+    module=policy_td_module,
+    spec=env.action_spec,
+    in_keys=["logits"],
+    distribution_class=OneHotCategorical,
+    return_log_prob=True,
+    # we'll need the log-prob for the numerator of the importance weights
+)
+
+print("Running policy:", policy_module(env.reset()))
+print("Running policy:", logits_policy(env.reset()))
+exit()
 # ---------- Policy ----------
 
 # ---------- Value Function ----------

@@ -64,7 +64,6 @@ class DataCollectorFromEnv:
         self._current_step = 0
         self._traj_id = 0
         self._step_count = 0
-        self._curr_traj_r = 0
 
         # Current observation
         self._current_observation, _ = self._env.reset()
