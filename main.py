@@ -17,13 +17,16 @@ if torch.cuda.is_available():
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Create the environment
-env_name = "Hopper-v5"
+env_name = "BipedalWalker-v3"
 env = gym.make(env_name)
 # env = NormalizedObservation(env)
-# env = TimeLimit(env, max_episode_steps=500)
+env = TimeLimit(env, max_episode_steps=500)
 test_env = gym.make(env_name)
 # test_env = NormalizedObservation(test_env)
 # test_env = TimeLimit(test_env, max_episode_steps=500)
+render_env = gym.make(env_name, render_mode="human")
+# render_env = NormalizedObservation(render_env)
+# render_env = TimeLimit(render_env, max_episode_steps=500)
 
 # Create the policy
 n_hidden = 256
@@ -58,7 +61,7 @@ ppo = PPO(
     test_env=test_env,
     policy=actor_net,
     v_function=value_net,
-    horizon=1000,
+    horizon=1024,
     minibatch_size=64,
     optim_steps=10,
     c1=1.0,
@@ -74,3 +77,9 @@ ppo.learn(total_steps=5e5)
 # Test the policy
 print("Policy testing...")
 _, _ = ppo.test(10000)
+
+input("Press Enter to render the environment...")
+
+# Render the environment
+print("Rendering the environment...")
+_, _ = ppo.test(10000, env=render_env)

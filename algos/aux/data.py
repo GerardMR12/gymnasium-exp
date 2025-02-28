@@ -106,6 +106,9 @@ class DataCollectorFromEnv:
                     loc, scale, action, log_prob = self._policy(torch.tensor(self._current_observation, dtype=torch.float, device=self._device))
                     next_observation, reward, terminated, truncated, _ = self._env.step(action.detach().cpu().numpy())
 
+                # if reward < 0:
+                #     reward = 0.1 * reward # reward scaling for the BipedalWalker-v3 environment
+
                 # Fields from main td
                 _action.append(action)
                 _done.append(False)
