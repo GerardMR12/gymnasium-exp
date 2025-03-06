@@ -265,9 +265,13 @@ actor_net = nn.Sequential(
     NormalParamExtractor(),
 )
 
+print(actor_net.state_dict())
+
 policy_td_module = TensorDictModule(
     actor_net, in_keys=["observation"], out_keys=["loc", "scale"]
 )
+
+print(policy_td_module.state_dict())
 
 policy_module = ProbabilisticActor(
     module=policy_td_module,
@@ -281,6 +285,11 @@ policy_module = ProbabilisticActor(
     return_log_prob=True,
     # we'll need the log-prob for the numerator of the importance weights
 )
+
+print(policy_module.state_dict())
+
+actor_net_again = policy_module.get_submodule("0").module # get the policy network back again form the ProbabilisticActor
+exit()
 
 actor_net = nn.Sequential(
     nn.LazyLinear(num_cells, device=device),
