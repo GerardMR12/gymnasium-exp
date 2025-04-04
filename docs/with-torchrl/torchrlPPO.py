@@ -44,7 +44,7 @@ max_grad_norm = 1.0
 print_info = False
 
 frames_per_batch = 1000
-total_frames = 50000 # for a complete training, bring the number of frames up to 1M
+total_frames = 100000 # for a complete training, bring the number of frames up to 1M
 
 sub_batch_size = 64 # cardinality of the sub-samples gathered from the current data in the inner loop
 num_epochs = 10  # optimization steps per batch of data collected
@@ -201,15 +201,8 @@ for i, tensordict_data in enumerate(collector):
         # We re-compute it at each epoch as its value depends on the value
         # network which is updated in the inner loop.
         advantage_module(tensordict_data)
-        # print(f"   Processing advantage: {tensordict_data}")
-        # sleep(5)
         data_view = tensordict_data.reshape(-1)
-        # print(f"   Processing data view: {data_view}")
-        # sleep(5)
         replay_buffer.extend(data_view.cpu())
-        # print(f"   Replay buffer: {replay_buffer}")
-        # sleep(5)
-        # exit()
         for _ in range(frames_per_batch // sub_batch_size):
             subdata = replay_buffer.sample(sub_batch_size)
             loss_vals = loss_module(subdata.to(device))
@@ -228,6 +221,7 @@ for i, tensordict_data in enumerate(collector):
             optim.step()
             optim.zero_grad()
 
+    logs["loss"].append(loss_value.item())
     logs["reward"].append(tensordict_data["next", "reward"].mean().item())
     pbar.update(tensordict_data.numel())
     cum_reward_str = (
@@ -282,5 +276,11 @@ plt.title("Return (test)")
 plt.subplot(2, 2, 4)
 plt.plot(logs["eval step_count"])
 plt.title("Max step count (test)")
-plt.savefig(f"{env_name}_torchrlPPO.png")
+plt.savefig(f"{env_name}_torchrlPPO_learning.png", dpi=500)
+plt.close()
+
+plt.plot(logs["loss"])
+plt.title("Loss")
+plt.savefig(f"{env_name}_torchrlPPO_loss.png", dpi=500)
+plt.close()
 # ---------- Results ----------
